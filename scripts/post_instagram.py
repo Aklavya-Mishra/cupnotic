@@ -48,9 +48,16 @@ def next_post():
     return next((p for p in queue if p["id"] not in done), None), len(queue) - len(done)
 
 
+UPLOAD_ATTEMPTS = 3
+
+
+class ApiError(Exception):
+    pass
+
+
 def check(resp):
     if not resp.ok:
-        sys.exit(f"API error {resp.status_code}: {resp.text}")
+        raise ApiError(f"API error {resp.status_code}: {resp.text}")
     return resp.json()
 
 
@@ -64,17 +71,11 @@ def hours_since_last_post(ig_user, token, ver):
     return (datetime.now(timezone.utc) - last).total_seconds() / 3600
 
 
-def publish(post, ig_user, token, ver, base_url, verify=False):
+def prepare_container(post, ig_user, token, ver, base_url):
+    """Create container, upload video, wait until FINISHED. Returns container id."""
     graph = f"https://graph.facebook.com/{ver}"
     video = ROOT / post["video"]
     cover_url = base_url.rstrip("/") + "/" + post["cover"]
-
-    if verify:
-        acct = check(requests.get(f"{graph}/{ig_user}", params={
-            "fields": "username", "access_token": token}, timeout=30))
-        limit = check(requests.get(f"{graph}/{ig_user}/content_publishing_limit", params={
-            "fields": "quota_usage,config", "access_token": token}, timeout=30))
-        print(f"account @{acct.get('username')} publishing quota {limit.get('data')}")
 
     # 1. create container
     container = check(requests.post(f"{graph}/{ig_user}/media", data={
@@ -107,10 +108,33 @@ def publish(post, ig_user, token, ver, base_url, verify=False):
         if code == "FINISHED":
             break
         if code in ("ERROR", "EXPIRED"):
-            sys.exit(f"processing failed: {st}")
+            raise ApiError(f"processing failed: {st}")
         if time.time() > deadline:
-            sys.exit("processing timed out")
+            raise ApiError("processing timed out")
         time.sleep(POLL_EVERY_S)
+    return container
+
+
+def publish(post, ig_user, token, ver, base_url, verify=False):
+    graph = f"https://graph.facebook.com/{ver}"
+
+    if verify:
+        acct = check(requests.get(f"{graph}/{ig_user}", params={
+            "fields": "username", "access_token": token}, timeout=30))
+        limit = check(requests.get(f"{graph}/{ig_user}/content_publishing_limit", params={
+            "fields": "quota_usage,config", "access_token": token}, timeout=30))
+        print(f"account @{acct.get('username')} publishing quota {limit.get('data')}")
+
+    # steps 1-3 retry with a fresh container: Meta's upload endpoint fails transiently
+    for attempt in range(1, UPLOAD_ATTEMPTS + 1):
+        try:
+            container = prepare_container(post, ig_user, token, ver, base_url)
+            break
+        except (ApiError, requests.RequestException) as e:
+            print(f"attempt {attempt}/{UPLOAD_ATTEMPTS} failed: {e}")
+            if attempt == UPLOAD_ATTEMPTS:
+                raise ApiError(f"upload failed after {UPLOAD_ATTEMPTS} attempts")
+            time.sleep(30)
 
     if verify:
         print(f"VERIFY OK: container {container} ready, NOT published (expires in 24h)")
@@ -119,8 +143,12 @@ def publish(post, ig_user, token, ver, base_url, verify=False):
     # 4. publish
     media_id = check(requests.post(f"{graph}/{ig_user}/media_publish", data={
         "creation_id": container, "access_token": token}, timeout=60))["id"]
-    link = check(requests.get(f"{graph}/{media_id}", params={
-        "fields": "permalink", "access_token": token}, timeout=30)).get("permalink")
+    # already live: a failed permalink lookup must not stop posted.json from being saved
+    try:
+        link = check(requests.get(f"{graph}/{media_id}", params={
+            "fields": "permalink", "access_token": token}, timeout=30)).get("permalink")
+    except (ApiError, requests.RequestException):
+        link = None
     print(f"published {media_id} {link}")
     return media_id, link
 
@@ -173,4 +201,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ApiError as e:
+        sys.exit(str(e))
