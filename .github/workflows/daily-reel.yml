@@ -1,0 +1,54 @@
+name: Daily reel
+
+on:
+  schedule:
+    # 13:47 UTC = 19:17 IST. GitHub cron often runs late, so the post usually lands 19:20-19:45 IST.
+    - cron: "47 13 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Only show the next reel, do not post"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-reel
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests==2.32.3
+
+      - name: Post next reel
+        env:
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          GRAPH_API_VERSION: ${{ vars.GRAPH_API_VERSION || 'v23.0' }}
+          MEDIA_BASE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python scripts/post_instagram.py --dry-run
+          else
+            python scripts/post_instagram.py
+          fi
+
+      - name: Record posted reel
+        if: ${{ inputs.dry_run != true }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add posted.json
+          git diff --cached --quiet || git commit -m "chore: mark reel posted [skip ci]"
+          git push

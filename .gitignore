@@ -1,0 +1,3 @@
+# answers stay local; posts.json holds the public captions
+cupnotic_reels/captions_and_answers.txt
+__pycache__/
