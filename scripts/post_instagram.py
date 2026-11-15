@@ -16,6 +16,7 @@ Env:
 
   python scripts/post_instagram.py            # post next reel
   python scripts/post_instagram.py --dry-run  # show what would be posted
+  python scripts/post_instagram.py --verify   # full rehearsal, stops before publish
 """
 import argparse
 import json
@@ -51,10 +52,17 @@ def check(resp):
     return resp.json()
 
 
-def publish(post, ig_user, token, ver, base_url):
+def publish(post, ig_user, token, ver, base_url, verify=False):
     graph = f"https://graph.facebook.com/{ver}"
     video = ROOT / post["video"]
     cover_url = base_url.rstrip("/") + "/" + post["cover"]
+
+    if verify:
+        acct = check(requests.get(f"{graph}/{ig_user}", params={
+            "fields": "username", "access_token": token}, timeout=30))
+        limit = check(requests.get(f"{graph}/{ig_user}/content_publishing_limit", params={
+            "fields": "quota_usage,config", "access_token": token}, timeout=30))
+        print(f"account @{acct.get('username')} publishing quota {limit.get('data')}")
 
     # 1. create container
     container = check(requests.post(f"{graph}/{ig_user}/media", data={
@@ -92,6 +100,10 @@ def publish(post, ig_user, token, ver, base_url):
             sys.exit("processing timed out")
         time.sleep(POLL_EVERY_S)
 
+    if verify:
+        print(f"VERIFY OK: container {container} ready, NOT published (expires in 24h)")
+        return None, None
+
     # 4. publish
     media_id = check(requests.post(f"{graph}/{ig_user}/media_publish", data={
         "creation_id": container, "access_token": token}, timeout=60))["id"]
@@ -104,7 +116,9 @@ def publish(post, ig_user, token, ver, base_url):
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--dry-run", action="store_true", help="show next reel, no API calls")
+    ap.add_argument("--verify", action="store_true",
+                    help="run every API step except media_publish; nothing goes live")
     args = ap.parse_args()
 
     post, remaining = next_post()
@@ -122,7 +136,10 @@ def main():
         sys.exit(f"missing env: {', '.join(missing)}")
 
     media_id, link = publish(post, env["IG_USER_ID"], env["IG_ACCESS_TOKEN"],
-                             os.environ.get("GRAPH_API_VERSION", "v23.0"), env["MEDIA_BASE_URL"])
+                             os.environ.get("GRAPH_API_VERSION", "v23.0"), env["MEDIA_BASE_URL"],
+                             verify=args.verify)
+    if args.verify:
+        return
 
     state = load(STATE, [])
     state.append({"id": post["id"], "media_id": media_id, "permalink": link,

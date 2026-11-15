@@ -6,10 +6,11 @@ on:
     - cron: "47 13 * * *"
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: "Only show the next reel, do not post"
-        type: boolean
-        default: true
+      mode:
+        description: "dry-run = show next reel | verify = upload but do not publish | post = publish for real"
+        type: choice
+        options: [dry-run, verify, post]
+        default: dry-run
 
 permissions:
   contents: write
@@ -22,6 +23,9 @@ jobs:
   post:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      # scheduled runs have no inputs, so they always post
+      MODE: ${{ inputs.mode || 'post' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -31,21 +35,22 @@ jobs:
 
       - run: pip install requests==2.32.3
 
-      - name: Post next reel
+      - name: Run (${{ env.MODE }})
         env:
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
           GRAPH_API_VERSION: ${{ vars.GRAPH_API_VERSION || 'v23.0' }}
           MEDIA_BASE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}
         run: |
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            python scripts/post_instagram.py --dry-run
-          else
-            python scripts/post_instagram.py
-          fi
+          case "$MODE" in
+            dry-run) python scripts/post_instagram.py --dry-run ;;
+            verify)  python scripts/post_instagram.py --verify ;;
+            post)    python scripts/post_instagram.py ;;
+            *) echo "unknown mode $MODE"; exit 1 ;;
+          esac
 
       - name: Record posted reel
-        if: ${{ inputs.dry_run != true }}
+        if: ${{ env.MODE == 'post' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
