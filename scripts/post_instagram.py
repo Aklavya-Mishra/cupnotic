@@ -34,6 +34,8 @@ STATE = ROOT / "posted.json"
 
 POLL_EVERY_S = 10
 POLL_TIMEOUT_S = 15 * 60
+# skip the run if the account already posted recently (e.g. a manual post from the app)
+MIN_GAP_HOURS = float(os.environ.get("MIN_GAP_HOURS", "12"))
 
 
 def load(path, default):
@@ -50,6 +52,16 @@ def check(resp):
     if not resp.ok:
         sys.exit(f"API error {resp.status_code}: {resp.text}")
     return resp.json()
+
+
+def hours_since_last_post(ig_user, token, ver):
+    """Hours since the newest post on the account (any source, incl. manual), or None."""
+    data = check(requests.get(f"https://graph.facebook.com/{ver}/{ig_user}/media", params={
+        "fields": "timestamp", "limit": 1, "access_token": token}, timeout=30)).get("data", [])
+    if not data:
+        return None
+    last = datetime.strptime(data[0]["timestamp"], "%Y-%m-%dT%H:%M:%S%z")
+    return (datetime.now(timezone.utc) - last).total_seconds() / 3600
 
 
 def publish(post, ig_user, token, ver, base_url, verify=False):
@@ -119,6 +131,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="show next reel, no API calls")
     ap.add_argument("--verify", action="store_true",
                     help="run every API step except media_publish; nothing goes live")
+    ap.add_argument("--force", action="store_true",
+                    help=f"post even if the account posted within the last {MIN_GAP_HOURS}h")
     args = ap.parse_args()
 
     post, remaining = next_post()
@@ -135,9 +149,20 @@ def main():
     if missing:
         sys.exit(f"missing env: {', '.join(missing)}")
 
-    media_id, link = publish(post, env["IG_USER_ID"], env["IG_ACCESS_TOKEN"],
-                             os.environ.get("GRAPH_API_VERSION", "v23.0"), env["MEDIA_BASE_URL"],
-                             verify=args.verify)
+    ver = os.environ.get("GRAPH_API_VERSION", "v23.0")
+
+    if not args.force:
+        gap = hours_since_last_post(env["IG_USER_ID"], env["IG_ACCESS_TOKEN"], ver)
+        print(f"last post on account: {'none' if gap is None else f'{gap:.1f}h ago'}")
+        if args.verify:
+            if gap is not None and gap < MIN_GAP_HOURS:
+                print("(a real post run would SKIP now)")
+        elif gap is not None and gap < MIN_GAP_HOURS:
+            print(f"SKIP: account posted {gap:.1f}h ago (< {MIN_GAP_HOURS}h). Use --force to override.")
+            return
+
+    media_id, link = publish(post, env["IG_USER_ID"], env["IG_ACCESS_TOKEN"], ver,
+                             env["MEDIA_BASE_URL"], verify=args.verify)
     if args.verify:
         return
 
