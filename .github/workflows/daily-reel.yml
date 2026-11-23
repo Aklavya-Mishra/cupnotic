@@ -2,8 +2,12 @@ name: Daily reel
 
 on:
   schedule:
-    # 13:47 UTC = 19:17 IST. GitHub cron often runs late, so the post usually lands 19:20-19:45 IST.
-    - cron: "47 13 * * *"
+    # Target: 13:47 UTC = 19:17 IST.
+    # GitHub cron is best-effort and has started runs 6-9h late, so we fire
+    # several early triggers. Each run sleeps until the target time, then posts.
+    # Runs that start after the posting window skip (see "Wait for post time").
+    # Duplicates are blocked by concurrency + the 12h last-post check in the script.
+    - cron: "13 1,3,5,7,9,11,13 * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -22,20 +26,49 @@ concurrency:
 jobs:
   post:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # long enough to sleep up to MAX_WAIT_MIN before posting
+    timeout-minutes: 330
     env:
       # scheduled runs have no inputs, so they always post
       MODE: ${{ inputs.mode || 'post' }}
+      TARGET_UTC: "13:47"     # 19:17 IST
+      LATE_GRACE_MIN: "45"    # scheduled run starting after 20:02 IST skips the day
+      MAX_WAIT_MIN: "290"     # earlier runs exit; a later trigger takes over
     steps:
-      - uses: actions/checkout@v5
+      - name: Wait for post time
+        id: gate
+        if: ${{ github.event_name == 'schedule' }}
+        run: |
+          now=$(date -u +%s)
+          target=$(date -u -d "today $TARGET_UTC" +%s)
+          wait=$(( target - now ))
+          if [ "$wait" -gt $(( MAX_WAIT_MIN * 60 )) ]; then
+            echo "Too early ($((wait / 60)) min to target). A later trigger will post."
+            echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "$wait" -lt $(( -LATE_GRACE_MIN * 60 )) ]; then
+            echo "Too late ($(( -wait / 60 )) min past target). Skipping; reel stays queued for tomorrow."
+            echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "$wait" -gt 0 ]; then
+            echo "Sleeping $((wait / 60)) min until $TARGET_UTC UTC"
+            sleep "$wait"
+          fi
+          echo "go=true" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-python@v6
+      - if: ${{ steps.gate.outputs.go != 'false' }}
+        uses: actions/checkout@v5
+
+      - if: ${{ steps.gate.outputs.go != 'false' }}
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      - run: pip install requests==2.32.3
+      - if: ${{ steps.gate.outputs.go != 'false' }}
+        run: pip install requests==2.32.3
 
       - name: Run (${{ env.MODE }})
+        if: ${{ steps.gate.outputs.go != 'false' }}
         env:
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
@@ -50,7 +83,7 @@ jobs:
           esac
 
       - name: Record posted reel
-        if: ${{ env.MODE == 'post' }}
+        if: ${{ env.MODE == 'post' && steps.gate.outputs.go != 'false' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
