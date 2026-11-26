@@ -198,6 +198,22 @@ def main():
     state.append({"id": post["id"], "media_id": media_id, "permalink": link,
                   "posted_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
     STATE.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    prune_posted()
+
+
+def prune_posted():
+    """Delete video + cover of every reel in posted.json; they are live on Instagram now.
+    Instagram already fetched the cover (sha-pinned URL) before publish, so this is safe."""
+    queue = {p["id"]: p for p in load(QUEUE, [])}
+    for entry in load(STATE, []):
+        post = queue.get(entry["id"])
+        if not post:
+            continue
+        for rel in (post["video"], post["cover"]):
+            f = ROOT / rel
+            if f.exists():
+                f.unlink()
+                print(f"removed {rel}")
 
 
 if __name__ == "__main__":

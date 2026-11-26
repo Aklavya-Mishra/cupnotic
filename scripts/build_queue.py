@@ -42,11 +42,14 @@ def parse(text):
 
 def main():
     posts = parse(SRC.read_text(encoding="utf-8"))
+    state = ROOT / "posted.json"
+    posted = {e["id"] for e in json.loads(state.read_text(encoding="utf-8"))} if state.exists() else set()
     queue = []
     for p in posts:
         video = f"{REELS}/{p['id']}.mp4"
         cover = f"{REELS}/covers/{p['id']}_cover.jpg"
-        for f in (video, cover):
+        # posted reels had their media deleted after posting; keep their queue entry as-is
+        for f in () if p["id"] in posted else (video, cover):
             if not (ROOT / f).exists():
                 sys.exit(f"missing file: {f}")
         if len(p["caption"]) > 2200:
